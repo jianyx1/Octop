@@ -161,7 +161,7 @@ if [ -f "$CLI_SRC" ]; then
     if "$CLI_SRC" version >/dev/null 2>&1; then
         echo "[octop-native] CLI 冒烟验证通过：octop version 可正常执行" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>&1 || true
     else
-        echo "[octop-native] 警告：CLI 冒烟验证未通过（octop version 执行失败）；首次启动会自动用内置 whl 离线安装，之后 CLI 即可用。" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>&1 || true
+        echo "[octop-native] 警告：CLI 冒烟验证未通过（octop version 执行失败）；请检查应用中心中的 Octop 安装状态。" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>&1 || true
     fi
 fi
 

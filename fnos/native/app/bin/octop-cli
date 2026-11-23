@@ -19,29 +19,30 @@
 #
 set -euo pipefail
 
-# 共享函数库（find_python312 / fix_ownership_and_perms / free_octop_ports）
-# 打包时由 scripts/build-fpk.sh 注入；仓库内运行无此文件时跳过（函数缺失时再报错）。
-# 注意：FPK 解包后 cmd/ 落在 /var/apps/octop-native/cmd（管理目录），而本文件位于
-# 负载目录 $TRIM_APPDEST/bin，`$0/../cmd` 指向载荷内不存在的位置，故需回退到
-# 外层 cmd 的实际落点。
-_OCTOP_COMMON="$(dirname "$0")/../cmd/common.sh"
-[ -f "$_OCTOP_COMMON" ] || _OCTOP_COMMON="/var/apps/octop-native/cmd/common.sh"
-[ -f "$_OCTOP_COMMON" ] && source "$_OCTOP_COMMON"
+# SSH 不会继承飞牛应用中心的 TRIM_APPDEST。PATH 上的 octop 是安装
+# 回调创建的软链接，跟随它才能找到位于数据卷上的应用载荷。
+APP_ROOT="/var/apps/octop-native"
+APPDEST="${TRIM_APPDEST:-$(dirname "$(dirname "$(readlink -f -- "$0")")")}"
+PKGVAR="${TRIM_PKGVAR:-$APP_ROOT/var}"
+SITE_PACKAGES="$APPDEST/site-packages"
 
-APPDEST="${TRIM_APPDEST:-/var/apps/octop-native}"
-PKGVAR="${TRIM_PKGVAR:-/var/apps/octop-native/var}"
-
-# 数据目录：优先飞牛 data-share 共享目录，否则回退包内目录
-if [ -n "${TRIM_DATA_SHARE_PATHS:-}" ]; then
-    DATA_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
-else
-    DATA_DIR="$APPDEST/shares/octop-native/data"
+if [ ! -r "$SITE_PACKAGES/octop/cli/main.py" ]; then
+    echo "[octop] 未找到已安装的核心包：$SITE_PACKAGES。请在飞牛应用中心检查 Octop 的安装。" >&2
+    exit 1
 fi
 
-mkdir -p "$DATA_DIR" "$PKGVAR"
+# 管理目录与应用载荷分开。直接调用时仍从应用中心目录加载共享函数。
+_OCTOP_COMMON="$APPDEST/cmd/common.sh"
+[ -f "$_OCTOP_COMMON" ] || _OCTOP_COMMON="$APP_ROOT/cmd/common.sh"
+[ -f "$_OCTOP_COMMON" ] && source "$_OCTOP_COMMON"
 
-# 加载安装向导写入的配置（OCTOP_PORT / 管理员账号 等）
-if [ -f "$PKGVAR/.env" ]; then
+# 数据共享链接属于管理目录，与应用载荷所在卷无关。
+DATA_SHARES="${TRIM_DATA_SHARE_PATHS:-}"
+DATA_DIR="${DATA_SHARES%%:*}"
+DATA_DIR="${DATA_DIR:-$APP_ROOT/shares/octop-native/data}"
+
+# 数据目录由应用中心初始化。普通 SSH 用户可能没有读取向导配置的权限。
+if [ -r "$PKGVAR/.env" ]; then
     set -a; . "$PKGVAR/.env"; set +a
 fi
 
@@ -64,35 +65,16 @@ PY="$(find_python312)" || {
 }
 
 # 关键环境变量：让 octop 找到包本体（site-packages）与你的数据目录
-SITE_PACKAGES="$APPDEST/site-packages"
 export PYTHONPATH="${SITE_PACKAGES}${PYTHONPATH:+:$PYTHONPATH}"
 export HOME="$DATA_DIR"
 export OCTOP_HOME="$DATA_DIR/.octop"
 export OCTOP_DATA_DIR="$DATA_DIR"
-
-# 内置在线升级优先使用 uv（pip 对 octop-harness[all] 依赖树解析会卡死）。
-# 系统无 uv 且当前为 root 时自动安装一次（装到系统 Python bin，软链到 /usr/local/bin）。
-if [ "$(id -u)" = "0" ] && ! command -v uv >/dev/null 2>&1; then
-    "$PY" -m pip install -q --disable-pip-version-check uv 2>/dev/null || true
-    if [ -x "$(dirname "$PY")/uv" ]; then
-        ln -sf "$(dirname "$PY")/uv" /usr/local/bin/uv 2>/dev/null || true
-    fi
-fi
 
 # 飞牛 FPK 部署标识 + 打包 site-packages 路径：内置在线升级安装到此目录
 # （launcher 实际加载的位置），重启服务后即加载新版，升级真正生效
 # （见 src/octop/infra/setup/self_update.py 的 _run_fpk_upgrade）。
 export OCTOP_INSTALL_MODE="fpk-native"
 export OCTOP_FPK_SITE_PACKAGES="$SITE_PACKAGES"
-
-# 兜底：若包内 octop 未就绪，用内置核心 whl 离线安装（避免联网）
-if ! "$PY" -c "import octop" >/dev/null 2>&1; then
-    echo "[octop] 未检测到已安装的 Octop，正在用内置核心 whl 离线安装 ..."
-    "$PY" -m pip install --no-cache --no-index --find-links "$SITE_PACKAGES" "$SITE_PACKAGES/octop.whl" >/dev/null 2>&1 || {
-        echo "[octop] 离线安装失败，请检查网络或手动执行：$PY -m pip install $SITE_PACKAGES/octop.whl" >&2
-        exit 1
-    }
-fi
 
 # 以 octop-native 身份运行，避免产生 root 所有的数据文件
 if id octop-native >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
